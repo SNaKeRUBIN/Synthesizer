@@ -1,13 +1,13 @@
 #pragma once
 
-#include <iostream>
-#include <thread>
-#include <atomic>
-#include <mutex>
-#include <condition_variable>
-#include <string>
-#include <stdlib.h>
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <stdlib.h>
+#include <string>
+#include <thread>
 
 #include <Windows.h>
 
@@ -18,31 +18,34 @@ constexpr double PI = 3.14159265358979;
 
 namespace Utils
 {
-    template <class T>
-    T atomic_fetch_add(std::atomic<T> &obj, T arg)
+template <class T>
+T atomic_fetch_add(std::atomic<T>& obj, T arg,
+                   const std::memory_order success = std::memory_order_seq_cst,
+                   const std::memory_order failure = std::memory_order_seq_cst)
+{
+    T expected = obj.load(std::memory_order_relaxed);
+    while (
+        !obj.compare_exchange_weak(expected, expected + arg, success, failure))
     {
-        T expected = obj.load();
-        while (!obj.compare_exchange_weak(expected, expected + arg))
-        {
-        }
-        return expected;
     }
+    return expected;
+}
 
 } // namespace Utils
 
 template <class T>
 class NoiseMaker
 {
-public:
-    NoiseMaker(const tString &outputDevice, unsigned sampleRate = 44100, unsigned numChannels = 1, unsigned numBlocks = 8, unsigned numBlockSamples = 256)
+  public:
+    NoiseMaker(const tString& outputDevice, unsigned sampleRate = 44100,
+               unsigned numChannels = 1, unsigned numBlocks = 8,
+               unsigned numBlockSamples = 256)
     {
-        Create(outputDevice, sampleRate, numChannels, numBlocks, numBlockSamples);
+        Create(outputDevice, sampleRate, numChannels, numBlocks,
+               numBlockSamples);
     }
 
-    ~NoiseMaker()
-    {
-        Destroy();
-    }
+    ~NoiseMaker() { Destroy(); }
 
     void Stop()
     {
@@ -50,10 +53,7 @@ public:
         mThread.join();
     }
 
-    double GetTime() const
-    {
-        return mGlobalTime.load();
-    }
+    double GetTime() const { return mGlobalTime.load(); }
 
     static std::vector<tString> Enumerate()
     {
@@ -62,7 +62,8 @@ public:
         WAVEOUTCAPS woc;
         for (unsigned n = 0; n < deviceCount; ++n)
         {
-            if (waveOutGetDevCaps(n, &woc, sizeof(WAVEOUTCAPS)) == MMSYSERR_NOERROR)
+            if (waveOutGetDevCaps(n, &woc, sizeof(WAVEOUTCAPS)) ==
+                MMSYSERR_NOERROR)
             {
                 devices.emplace_back(woc.szPname);
             }
@@ -75,8 +76,10 @@ public:
         mUserFunction = func;
     }
 
-private:
-    bool Create(const tString &outputDevice, const unsigned sampleRate = 44100, const unsigned numChannels = 1, const unsigned numBlocks = 8, const unsigned numSamplesPerBlock = 256)
+  private:
+    bool Create(const tString& outputDevice, const unsigned sampleRate = 44100,
+                const unsigned numChannels = 1, const unsigned numBlocks = 8,
+                const unsigned numSamplesPerBlock = 256)
     {
         mReady.store(false);
         mSampleRate = sampleRate;
@@ -92,22 +95,29 @@ private:
 
         // Validate Device
         const auto devices = Enumerate();
-        const auto device = std::find(std::cbegin(devices), std::cend(devices), outputDevice);
+        const auto device =
+            std::find(std::cbegin(devices), std::cend(devices), outputDevice);
         if (device != std::cend(devices))
         {
             // Device is available
-            const auto deviceID = static_cast<UINT>(std::distance(std::cbegin(devices), device));
+            const auto deviceID =
+                static_cast<UINT>(std::distance(std::cbegin(devices), device));
             WAVEFORMATEX waveFormat;
             waveFormat.wFormatTag = WAVE_FORMAT_PCM;
             waveFormat.nSamplesPerSec = mSampleRate;
             waveFormat.wBitsPerSample = sizeof(T) * 8;
             waveFormat.nChannels = mNumChannels;
-            waveFormat.nBlockAlign = (waveFormat.wBitsPerSample / 8) * waveFormat.nChannels;
-            waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
+            waveFormat.nBlockAlign =
+                (waveFormat.wBitsPerSample / 8) * waveFormat.nChannels;
+            waveFormat.nAvgBytesPerSec =
+                waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
             waveFormat.cbSize = 0;
 
             // Open Device if valid
-            if (waveOutOpen(&mHWDevice, deviceID, &waveFormat, reinterpret_cast<DWORD_PTR>(WaveOutProcWrap), reinterpret_cast<DWORD_PTR>(this), CALLBACK_FUNCTION) != S_OK)
+            if (waveOutOpen(&mHWDevice, deviceID, &waveFormat,
+                            reinterpret_cast<DWORD_PTR>(WaveOutProcWrap),
+                            reinterpret_cast<DWORD_PTR>(this),
+                            CALLBACK_FUNCTION) != S_OK)
             {
                 return Destroy();
             }
@@ -121,7 +131,8 @@ private:
         for (unsigned n = 0; n < mNumBlocks; ++n)
         {
             mWaveHeadersVec[n].dwBufferLength = mSamplesPerBlock * sizeof(T);
-            mWaveHeadersVec[n].lpData = reinterpret_cast<LPSTR>(mBlockMemoryVec.data() + (n * mSamplesPerBlock));
+            mWaveHeadersVec[n].lpData = reinterpret_cast<LPSTR>(
+                mBlockMemoryVec.data() + (n * mSamplesPerBlock));
         }
 
         mReady.store(true);
@@ -134,10 +145,7 @@ private:
         return true;
     }
 
-    bool Destroy()
-    {
-        return false;
-    }
+    bool Destroy() { return false; }
 
     double Clip(const double sample, const double max)
     {
@@ -159,7 +167,8 @@ private:
 
     // this call back can tell if sound card is done with current block
     // Handler for soundcard request for more data
-    void WaveOutProc(HWAVEOUT waveOut, UINT msg, DWORD_PTR param1, DWORD_PTR param2)
+    void WaveOutProc(HWAVEOUT waveOut, UINT msg, DWORD_PTR param1,
+                     DWORD_PTR param2)
     {
         if (msg != WOM_DONE)
             return;
@@ -170,15 +179,18 @@ private:
     }
 
     // static wrapper for sound card handler
-    static void CALLBACK WaveOutProcWrap(HWAVEOUT waveOut, UINT msg, DWORD_PTR instance, DWORD_PTR param1, DWORD_PTR param2)
+    static void CALLBACK WaveOutProcWrap(HWAVEOUT waveOut, UINT msg,
+                                         DWORD_PTR instance, DWORD_PTR param1,
+                                         DWORD_PTR param2)
     {
-        reinterpret_cast<NoiseMaker *>(instance)->WaveOutProc(waveOut, msg, param1, param2);
+        reinterpret_cast<NoiseMaker*>(instance)->WaveOutProc(waveOut, msg,
+                                                             param1, param2);
     }
 
-    // Main thread. This loop responds to requests from the soundcard to fill 'blocks'
-    // with audio data. If no requests are available it foes dormant untill the sound
-    // card is ready for more data. The block is filled by the the 'user' in some manner
-    // and then issued to the soundcard.
+    // Main thread. This loop responds to requests from the soundcard to fill
+    // 'blocks' with audio data. If no requests are available it foes dormant
+    // untill the sound card is ready for more data. The block is filled by the
+    // the 'user' in some manner and then issued to the soundcard.
     void MainThread()
     {
         // Note: Do not (de)allocate memory in this thread
@@ -186,7 +198,8 @@ private:
         mGlobalTime.store(0.0);
         const double timeStep = 1.0 / (double)mSampleRate;
 
-        constexpr double maxSample = static_cast<double>((std::numeric_limits<T>::max)());
+        constexpr double maxSample =
+            static_cast<double>((std::numeric_limits<T>::max)());
 
         while (mReady.load())
         {
@@ -194,7 +207,8 @@ private:
             // if (mBlockFree.load() == 0)
             // {
             //     // std::unique_lock<std::mutex> lm(mMuxBlockNotZero);
-            //     // while (mBlockFree.load() == 0) // sometimes, Windows signals incorrectly
+            //     // while (mBlockFree.load() == 0) // sometimes, Windows
+            //     signals incorrectly
             //     // mCVBlockNotZero.wait(lm);
             // }
             while (mBlockFree.load() == 0)
@@ -207,7 +221,9 @@ private:
             // Prepare block for processing
             if (mWaveHeadersVec[mCurrentBlock].dwFlags & WHDR_PREPARED)
             {
-                waveOutUnprepareHeader(mHWDevice, &mWaveHeadersVec[mCurrentBlock], sizeof(WAVEHDR));
+                waveOutUnprepareHeader(mHWDevice,
+                                       &mWaveHeadersVec[mCurrentBlock],
+                                       sizeof(WAVEHDR));
             }
 
             const int curBlock = mCurrentBlock * mSamplesPerBlock;
@@ -220,11 +236,15 @@ private:
                     const T newSample = [&]() -> T {
                         if (!mUserFunction)
                         {
-                            return static_cast<T>(Clip(UserProcess(c, mGlobalTime), 1.0) * maxSample);
+                            return static_cast<T>(
+                                Clip(UserProcess(c, mGlobalTime), 1.0) *
+                                maxSample);
                         }
                         else
                         {
-                            return static_cast<T>(Clip(mUserFunction(c, mGlobalTime), 1.0) * maxSample);
+                            return static_cast<T>(
+                                Clip(mUserFunction(c, mGlobalTime), 1.0) *
+                                maxSample);
                         }
                     }();
 
@@ -235,8 +255,10 @@ private:
             }
 
             // Send block to sound device
-            waveOutPrepareHeader(mHWDevice, &mWaveHeadersVec[mCurrentBlock], sizeof(WAVEHDR));
-            waveOutWrite(mHWDevice, &mWaveHeadersVec[mCurrentBlock], sizeof(WAVEHDR));
+            waveOutPrepareHeader(mHWDevice, &mWaveHeadersVec[mCurrentBlock],
+                                 sizeof(WAVEHDR));
+            waveOutWrite(mHWDevice, &mWaveHeadersVec[mCurrentBlock],
+                         sizeof(WAVEHDR));
 
             mCurrentBlock++;
             mCurrentBlock %= mNumBlocks;

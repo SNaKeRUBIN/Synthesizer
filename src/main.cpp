@@ -1,380 +1,438 @@
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <string>
-#include <cstdlib>
-#include <chrono>
 #include <vector>
 
 #include "NoiseMaker.h"
 
 namespace Synth
 {
-    /////////////////////////////////
-    // Utilities
+/////////////////////////////////
+// Utilities
 
-    double FreqToAngVelocity(const double hz)
+double FreqToAngVelocity(const double hz) { return hz * 2.0 * PI; }
+
+struct InstrumentBase;
+
+// a basic node
+struct Note
+{
+    int id;
+    double on;
+    double off;
+    bool isActive;
+    InstrumentBase* channel;
+
+    Note() : id(0), on(0.0), off(0.0), isActive(false), channel(nullptr) {}
+};
+
+/////////////////////////////////
+// Multi-Function Oscillator
+
+enum class Oscillator
+{
+    Sine,
+    Square,
+    Triangle,
+    SawAnalog,
+    SawDigital,
+    Noise
+};
+
+double osc(const double hz, const double time,
+           const Oscillator type = Oscillator::Sine)
+{
+    switch (type)
     {
-        return hz * 2.0 * PI;
+    case Oscillator::Sine:
+        return std::sin(FreqToAngVelocity(hz) * time);
+    case Oscillator::Square:
+        return std::sin(FreqToAngVelocity(hz) * time) > 0 ? 1.0 : -1.0;
+    case Oscillator::Triangle:
+        return std::asin(std::sin(FreqToAngVelocity(hz) * time)) * (2.0 / PI);
+    case Oscillator::SawAnalog: {
+        double output = 0.0;
+
+        for (double n = 1.0; n < 40.0; ++n)
+        {
+            output += (std::sin(n * FreqToAngVelocity(hz) * time)) / n;
+        }
+        return output * (2.0 / PI);
+    }
+    case Oscillator::SawDigital:
+        return (2.0 / PI) * (hz * PI * std::fmod(time, 1.0 / hz) - (PI / 2.0));
+    case Oscillator::Noise: // Pseudorandom noise
+        return 2.0 * (static_cast<double>(std::rand()) / RAND_MAX) - 1.0;
+    default:
+        return 0.0;
+    }
+}
+
+//////////////////////////////////
+// Scale to Frequency conversion
+
+constexpr int SCALE_DEFAULT = 0;
+
+double Scale(const int noteId, const int scaleId = SCALE_DEFAULT)
+{
+    switch (scaleId)
+    {
+    case SCALE_DEFAULT:
+    default:
+        // https://stackoverflow.com/questions/1891544/how-can-i-implement-the-piano-key-frequency-function-in-c
+        // return 25.96 * std::pow(1.059463094359295, noteId);
+        return 8 * std::pow(1.059463094359295, noteId);
+    }
+}
+
+struct Envelope
+{
+    virtual double Amplitude(const double time, const double timeOn,
+                             const double timeOff) = 0;
+};
+
+// Amplitude (Attack, Decay, Sustain, Release) Envelope
+class EnvelopeADSR : public Envelope
+{
+  public:
+    explicit EnvelopeADSR(const double attackTime = 0.10,
+                          const double decayTime = 0.1,
+                          const double startAmplitude = 1.0,
+                          const double sustainAmplitude = 1.0,
+                          const double releaseTime = 0.2)
+        : mAttackTime(attackTime), mDecayTime(decayTime),
+          mStartAmplitude(startAmplitude), mSustainAmplitude(sustainAmplitude),
+          mReleaseTime(releaseTime)
+    {
     }
 
-    struct InstrumentBase;
-
-    // a basic node
-    struct Note
+    double Amplitude(const double time, const double timeOn,
+                     const double timeOff) override
     {
-        int id;
-        double on;
-        double off;
-        bool isActive;
-        InstrumentBase *channel;
+        double amplitude = 0.0;
 
-        Note() : id(0), on(0.0), off(0.0), isActive(false), channel(nullptr) {}
-    };
-
-    /////////////////////////////////
-    // Multi-Function Oscillator
-
-    enum class Oscillator
-    {
-        Sine,
-        Square,
-        Triangle,
-        SawAnalog,
-        SawDigital,
-        Noise
-    };
-
-    double osc(const double hz, const double time, const Oscillator type = Oscillator::Sine)
-    {
-        switch (type)
+        if (timeOn > timeOff) // Note is on
         {
-        case Oscillator::Sine:
-            return std::sin(FreqToAngVelocity(hz) * time);
-        case Oscillator::Square:
-            return std::sin(FreqToAngVelocity(hz) * time) > 0 ? 1.0 : -1.0;
-        case Oscillator::Triangle:
-            return std::asin(std::sin(FreqToAngVelocity(hz) * time)) * (2.0 / PI);
-        case Oscillator::SawAnalog:
-        {
-            double output = 0.0;
+            const double lifeTime = time - timeOn;
 
-            for (double n = 1.0; n < 40.0; ++n)
+            if (lifeTime <= mAttackTime)
             {
-                output += (std::sin(n * FreqToAngVelocity(hz) * time)) / n;
+                // In Attack phase - approach max amplitude
+                amplitude = (lifeTime / mAttackTime) * mStartAmplitude;
             }
-            return output * (2.0 / PI);
+            if (lifeTime > mAttackTime &&
+                lifeTime <= (mAttackTime + mDecayTime))
+            {
+                // In Decay phase - reduce to sustained amplitude
+                amplitude = ((lifeTime - mAttackTime) / mDecayTime) *
+                                (mSustainAmplitude - mStartAmplitude) +
+                            mStartAmplitude;
+            }
+            if (lifeTime > (mAttackTime + mDecayTime))
+            {
+                // In Sustain phase - done change till note released
+                amplitude = mSustainAmplitude;
+            }
         }
-        case Oscillator::SawDigital:
-            return (2.0 / PI) * (hz * PI * std::fmod(time, 1.0 / hz) - (PI / 2.0));
-        case Oscillator::Noise: // Pseudorandom noise
-            return 2.0 * (static_cast<double>(std::rand()) / RAND_MAX) - 1.0;
-        default:
-            return 0.0;
+        else // Note is off
+        {
+            const double lifeTime = timeOff - timeOn;
+            double releaseAmplitude = 0.0;
+
+            if (lifeTime <= mAttackTime)
+            {
+                // In Attack phase - approach max amplitude
+                releaseAmplitude = (lifeTime / mAttackTime) * mStartAmplitude;
+            }
+            if (lifeTime > mAttackTime &&
+                lifeTime <= (mAttackTime + mDecayTime))
+            {
+                // In Decay phase - reduce to sustained amplitude
+                releaseAmplitude = ((lifeTime - mAttackTime) / mDecayTime) *
+                                       (mSustainAmplitude - mStartAmplitude) +
+                                   mStartAmplitude;
+            }
+            if (lifeTime > (mAttackTime + mDecayTime))
+            {
+                // In Sustain phase - done change till note released
+                releaseAmplitude = mSustainAmplitude;
+            }
+
+            amplitude =
+                ((time - timeOff) / mReleaseTime) * (0.0 - releaseAmplitude) +
+                releaseAmplitude;
         }
+
+        // Amplitude should not be negative
+        if (amplitude <= 0.0001)
+            amplitude = 0.0;
+
+        return amplitude;
     }
 
-    //////////////////////////////////
-    // Scale to Frequency conversion
+  private:
+    const double mAttackTime;
+    const double mDecayTime;
+    const double mStartAmplitude;
+    const double mSustainAmplitude;
+    const double mReleaseTime;
+};
 
-    constexpr int SCALE_DEFAULT = 0;
+double Env(const double time, Envelope& env, const double timeOn,
+           const double timeOff)
+{
+    return env.Amplitude(time, timeOn, timeOff);
+}
 
-    double Scale(const int noteId, const int scaleId = SCALE_DEFAULT)
+struct InstrumentBase
+{
+    double mVolume;
+    Synth::EnvelopeADSR mEnv;
+    double mMaxLifeTime;
+    std::wstring mName;
+
+    virtual double Sound(const double time, Synth::Note note,
+                         bool& isNoteFinished) = 0;
+
+    InstrumentBase(const double attackTime, const double decayTime,
+                   const double sustainAmplitude, const double releaseTime,
+                   const double maxLifeTime, const std::wstring& name)
+        : mVolume(1.0), mEnv(attackTime, decayTime, /*startAmplitude*/ 1.0,
+                             sustainAmplitude, releaseTime),
+          mMaxLifeTime(maxLifeTime), mName(name)
     {
-        switch (scaleId)
-        {
-        case SCALE_DEFAULT:
-        default:
-            // https://stackoverflow.com/questions/1891544/how-can-i-implement-the-piano-key-frequency-function-in-c
-            // return 25.96 * std::pow(1.059463094359295, noteId);
-            return 8 * std::pow(1.059463094359295, noteId);
-        }
+    }
+};
+
+struct InstrumentBell : public InstrumentBase
+{
+    InstrumentBell()
+        : InstrumentBase(/*attackTime*/ 0.01, /*decayTime*/ 1.0,
+                         /*sustainAmplitude*/ 0.0, /*releaseTime*/ 1.0,
+                         /*maxLifeTime*/ 3.0, /*name*/ L"Bell")
+    {
     }
 
-    struct Envelope
+    double Sound(const double time, Synth::Note note,
+                 bool& isNoteFinished) override
     {
-        virtual double Amplitude(const double time, const double timeOn, const double timeOff) = 0;
-    };
+        double amplitude = Synth::Env(time, mEnv, note.on, note.off);
+        if (amplitude <= 0.0)
+            isNoteFinished = true;
 
-    // Amplitude (Attack, Decay, Sustain, Release) Envelope
-    class EnvelopeADSR : public Envelope
+        double sound =
+            +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id + 12),
+                               Synth::Oscillator::Sine) +
+            0.50 * Synth::osc(time - note.on, Synth::Scale(note.id + 24)) +
+            0.25 * Synth::osc(time - note.on, Synth::Scale(note.id + 36));
+
+        return amplitude * sound * mVolume;
+    }
+};
+
+struct InstrumentBell8 : public InstrumentBase
+{
+    InstrumentBell8()
+        : InstrumentBase(/*attackTime*/ 0.01, /*decayTime*/ 0.5,
+                         /*sustainAmplitude*/ 0.8, /*releaseTime*/ 1.0,
+                         /*maxLifeTime*/ 3.0, /*name*/ L"8-Bit Bell")
     {
-    public:
-        explicit EnvelopeADSR(const double attackTime = 0.10, const double decayTime = 0.1, const double startAmplitude = 1.0, const double sustainAmplitude = 1.0, const double releaseTime = 0.2)
-            : mAttackTime(attackTime), mDecayTime(decayTime), mStartAmplitude(startAmplitude), mSustainAmplitude(sustainAmplitude), mReleaseTime(releaseTime)
-        {
-        }
-
-        double Amplitude(const double time, const double timeOn, const double timeOff) override
-        {
-            double amplitude = 0.0;
-
-            if (timeOn > timeOff) // Note is on
-            {
-                const double lifeTime = time - timeOn;
-
-                if (lifeTime <= mAttackTime)
-                {
-                    // In Attack phase - approach max amplitude
-                    amplitude = (lifeTime / mAttackTime) * mStartAmplitude;
-                }
-                if (lifeTime > mAttackTime && lifeTime <= (mAttackTime + mDecayTime))
-                {
-                    // In Decay phase - reduce to sustained amplitude
-                    amplitude = ((lifeTime - mAttackTime) / mDecayTime) * (mSustainAmplitude - mStartAmplitude) + mStartAmplitude;
-                }
-                if (lifeTime > (mAttackTime + mDecayTime))
-                {
-                    // In Sustain phase - done change till note released
-                    amplitude = mSustainAmplitude;
-                }
-            }
-            else // Note is off
-            {
-                const double lifeTime = timeOff - timeOn;
-                double releaseAmplitude = 0.0;
-
-                if (lifeTime <= mAttackTime)
-                {
-                    // In Attack phase - approach max amplitude
-                    releaseAmplitude = (lifeTime / mAttackTime) * mStartAmplitude;
-                }
-                if (lifeTime > mAttackTime && lifeTime <= (mAttackTime + mDecayTime))
-                {
-                    // In Decay phase - reduce to sustained amplitude
-                    releaseAmplitude = ((lifeTime - mAttackTime) / mDecayTime) * (mSustainAmplitude - mStartAmplitude) + mStartAmplitude;
-                }
-                if (lifeTime > (mAttackTime + mDecayTime))
-                {
-                    // In Sustain phase - done change till note released
-                    releaseAmplitude = mSustainAmplitude;
-                }
-
-                amplitude = ((time - timeOff) / mReleaseTime) * (0.0 - releaseAmplitude) + releaseAmplitude;
-            }
-
-            // Amplitude should not be negative
-            if (amplitude <= 0.0001)
-                amplitude = 0.0;
-
-            return amplitude;
-        }
-
-    private:
-        const double mAttackTime;
-        const double mDecayTime;
-        const double mStartAmplitude;
-        const double mSustainAmplitude;
-        const double mReleaseTime;
-    };
-
-    double Env(const double time, Envelope &env, const double timeOn, const double timeOff)
-    {
-        return env.Amplitude(time, timeOn, timeOff);
     }
 
-    struct InstrumentBase
+    double Sound(const double time, Synth::Note note,
+                 bool& isNoteFinished) override
     {
-        double mVolume;
-        Synth::EnvelopeADSR mEnv;
-        double mMaxLifeTime;
-        std::wstring mName;
+        double amplitude = Synth::Env(time, mEnv, note.on, note.off);
+        if (amplitude <= 0.0)
+            isNoteFinished = true;
 
-        virtual double Sound(const double time, Synth::Note note, bool &isNoteFinished) = 0;
+        double sound =
+            +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id),
+                               Synth::Oscillator::Square) +
+            0.50 * Synth::osc(time - note.on, Synth::Scale(note.id + 12)) +
+            0.25 * Synth::osc(time - note.on, Synth::Scale(note.id + 24));
 
-        InstrumentBase(const double attackTime, const double decayTime, const double sustainAmplitude, const double releaseTime, const double maxLifeTime, const std::wstring &name)
-            : mVolume(1.0), mEnv(attackTime, decayTime, /*startAmplitude*/ 1.0, sustainAmplitude, releaseTime), mMaxLifeTime(maxLifeTime), mName(name)
-        {
-        }
+        return amplitude * sound * mVolume;
+    }
+};
+
+struct InstrumentHarmonica : public InstrumentBase
+{
+    InstrumentHarmonica()
+        : InstrumentBase(/*attackTime*/ 0.05, /*decayTime*/ 1.0,
+                         /*sustainAmplitude*/ 0.95, /*releaseTime*/ 0.1,
+                         /*maxLifeTime*/ -1.0, /*name*/ L"Harmonica")
+    {
+    }
+
+    double Sound(const double time, Synth::Note note,
+                 bool& isNoteFinished) override
+    {
+        double amplitude = Synth::Env(time, mEnv, note.on, note.off);
+        if (amplitude <= 0.0)
+            isNoteFinished = true;
+
+        double sound =
+            +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id),
+                               Synth::Oscillator::Square) +
+            0.50 * Synth::osc(time - note.on, Synth::Scale(note.id + 12),
+                              Synth::Oscillator::Square) +
+            0.05 * Synth::osc(time - note.on, Synth::Scale(note.id + 24),
+                              Synth::Oscillator::Noise);
+
+        return amplitude * sound * mVolume;
+    }
+};
+
+struct InstrumentDrumKick : public InstrumentBase
+{
+    InstrumentDrumKick()
+        : InstrumentBase(/*attackTime*/ 0.01, /*decayTime*/ 0.15,
+                         /*sustainAmplitude*/ 0.0, /*releaseTime*/ 0.0,
+                         /*maxLifeTime*/ 1.5, /*name*/ L"Drum Kick")
+    {
+    }
+
+    double Sound(const double time, Synth::Note note,
+                 bool& isNoteFinished) override
+    {
+        double amplitude = Synth::Env(time, mEnv, note.on, note.off);
+        if (amplitude <= 0.0)
+            isNoteFinished = true;
+
+        double sound =
+            +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id),
+                               Synth::Oscillator::Square) +
+            0.50 * Synth::osc(time - note.on, Synth::Scale(note.id + 12),
+                              Synth::Oscillator::Square) +
+            0.05 * Synth::osc(time - note.on, Synth::Scale(note.id + 24),
+                              Synth::Oscillator::Noise);
+
+        return amplitude * sound * mVolume;
+    }
+};
+
+struct InstrumentDrumSnare : public InstrumentBase
+{
+    InstrumentDrumSnare()
+        : InstrumentBase(/*attackTime*/ 0.00, /*decayTime*/ 0.2,
+                         /*sustainAmplitude*/ 0.0, /*releaseTime*/ 0.0,
+                         /*maxLifeTime*/ 1.0, /*name*/ L"Drum Snare")
+    {
+    }
+
+    double Sound(const double time, Synth::Note note,
+                 bool& isNoteFinished) override
+    {
+        double amplitude = Synth::Env(time, mEnv, note.on, note.off);
+        if (amplitude <= 0.0)
+            isNoteFinished = true;
+
+        double sound =
+            +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id - 24),
+                               Synth::Oscillator::Sine) +
+            0.5 * Synth::osc(time - note.on, 0, Synth::Oscillator::Noise);
+
+        return amplitude * sound * mVolume;
+    }
+};
+
+struct InstrumentDrumHiHat : public InstrumentBase
+{
+    InstrumentDrumHiHat()
+        : InstrumentBase(/*attackTime*/ 0.00, /*decayTime*/ 0.2,
+                         /*sustainAmplitude*/ 0.0, /*releaseTime*/ 0.0,
+                         /*maxLifeTime*/ 1.0, /*name*/ L"Drum Snare")
+    {
+    }
+
+    double Sound(const double time, Synth::Note note,
+                 bool& isNoteFinished) override
+    {
+        double amplitude = Synth::Env(time, mEnv, note.on, note.off);
+        if (amplitude <= 0.0)
+            isNoteFinished = true;
+
+        double sound =
+            +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id - 12),
+                               Synth::Oscillator::Square) +
+            0.9 * Synth::osc(time - note.on, 0, Synth::Oscillator::Noise);
+
+        return amplitude * sound * mVolume;
+    }
+};
+
+struct Sequencer
+{
+  public:
+    struct Channel
+    {
+        InstrumentBase* instrument;
+        std::wstring beat;
     };
 
-    struct InstrumentBell : public InstrumentBase
+    Sequencer(const float tempo = 120.0f, const int beats = 4,
+              const int subBeats = 4)
     {
-        InstrumentBell()
-            : InstrumentBase(/*attackTime*/ 0.01, /*decayTime*/ 1.0, /*sustainAmplitude*/ 0.0, /*releaseTime*/ 1.0, /*maxLifeTime*/ 3.0, /*name*/ L"Bell")
-        {
-        }
+        mBeats = beats;
+        mSubBeats = subBeats;
+        mTempo = tempo;
+        mBeatTime = (60.f / mTempo) / (float)mSubBeats;
+        mCurBeat = 0;
+        mTotalBeats = mBeats * mSubBeats;
+        mAccumulate = 0;
+    }
 
-        double Sound(const double time, Synth::Note note, bool &isNoteFinished) override
-        {
-            double amplitude = Synth::Env(time, mEnv, note.on, note.off);
-            if (amplitude <= 0.0)
-                isNoteFinished = true;
-
-            double sound =
-                +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id + 12), Synth::Oscillator::Sine) + 0.50 * Synth::osc(time - note.on, Synth::Scale(note.id + 24)) + 0.25 * Synth::osc(time - note.on, Synth::Scale(note.id + 36));
-
-            return amplitude * sound * mVolume;
-        }
-    };
-
-    struct InstrumentBell8 : public InstrumentBase
+    size_t Update(const double elapsedTime)
     {
-        InstrumentBell8()
-            : InstrumentBase(/*attackTime*/ 0.01, /*decayTime*/ 0.5, /*sustainAmplitude*/ 0.8, /*releaseTime*/ 1.0, /*maxLifeTime*/ 3.0, /*name*/ L"8-Bit Bell")
+        mVecNotes.clear();
+        mAccumulate += elapsedTime;
+        while (mAccumulate >= mBeatTime)
         {
-        }
+            mAccumulate -= mBeatTime;
+            mCurBeat++;
 
-        double Sound(const double time, Synth::Note note, bool &isNoteFinished) override
-        {
-            double amplitude = Synth::Env(time, mEnv, note.on, note.off);
-            if (amplitude <= 0.0)
-                isNoteFinished = true;
+            if (mCurBeat >= mTotalBeats)
+                mCurBeat = 0;
 
-            double sound =
-                +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id), Synth::Oscillator::Square) + 0.50 * Synth::osc(time - note.on, Synth::Scale(note.id + 12)) + 0.25 * Synth::osc(time - note.on, Synth::Scale(note.id + 24));
-
-            return amplitude * sound * mVolume;
-        }
-    };
-
-    struct InstrumentHarmonica : public InstrumentBase
-    {
-        InstrumentHarmonica()
-            : InstrumentBase(/*attackTime*/ 0.05, /*decayTime*/ 1.0, /*sustainAmplitude*/ 0.95, /*releaseTime*/ 0.1, /*maxLifeTime*/ -1.0, /*name*/ L"Harmonica")
-        {
-        }
-
-        double Sound(const double time, Synth::Note note, bool &isNoteFinished) override
-        {
-            double amplitude = Synth::Env(time, mEnv, note.on, note.off);
-            if (amplitude <= 0.0)
-                isNoteFinished = true;
-
-            double sound =
-                +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id), Synth::Oscillator::Square) + 0.50 * Synth::osc(time - note.on, Synth::Scale(note.id + 12), Synth::Oscillator::Square) + 0.05 * Synth::osc(time - note.on, Synth::Scale(note.id + 24), Synth::Oscillator::Noise);
-
-            return amplitude * sound * mVolume;
-        }
-    };
-
-    struct InstrumentDrumKick : public InstrumentBase
-    {
-        InstrumentDrumKick()
-            : InstrumentBase(/*attackTime*/ 0.01, /*decayTime*/ 0.15, /*sustainAmplitude*/ 0.0, /*releaseTime*/ 0.0, /*maxLifeTime*/ 1.5, /*name*/ L"Drum Kick")
-        {
-        }
-
-        double Sound(const double time, Synth::Note note, bool &isNoteFinished) override
-        {
-            double amplitude = Synth::Env(time, mEnv, note.on, note.off);
-            if (amplitude <= 0.0)
-                isNoteFinished = true;
-
-            double sound =
-                +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id), Synth::Oscillator::Square) + 0.50 * Synth::osc(time - note.on, Synth::Scale(note.id + 12), Synth::Oscillator::Square) + 0.05 * Synth::osc(time - note.on, Synth::Scale(note.id + 24), Synth::Oscillator::Noise);
-
-            return amplitude * sound * mVolume;
-        }
-    };
-
-    struct InstrumentDrumSnare : public InstrumentBase
-    {
-        InstrumentDrumSnare()
-            : InstrumentBase(/*attackTime*/ 0.00, /*decayTime*/ 0.2, /*sustainAmplitude*/ 0.0, /*releaseTime*/ 0.0, /*maxLifeTime*/ 1.0, /*name*/ L"Drum Snare")
-        {
-        }
-
-        double Sound(const double time, Synth::Note note, bool &isNoteFinished) override
-        {
-            double amplitude = Synth::Env(time, mEnv, note.on, note.off);
-            if (amplitude <= 0.0)
-                isNoteFinished = true;
-
-            double sound =
-                +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id - 24), Synth::Oscillator::Sine) + 0.5 * Synth::osc(time - note.on, 0, Synth::Oscillator::Noise);
-
-            return amplitude * sound * mVolume;
-        }
-    };
-
-    struct InstrumentDrumHiHat : public InstrumentBase
-    {
-        InstrumentDrumHiHat()
-            : InstrumentBase(/*attackTime*/ 0.00, /*decayTime*/ 0.2, /*sustainAmplitude*/ 0.0, /*releaseTime*/ 0.0, /*maxLifeTime*/ 1.0, /*name*/ L"Drum Snare")
-        {
-        }
-
-        double Sound(const double time, Synth::Note note, bool &isNoteFinished) override
-        {
-            double amplitude = Synth::Env(time, mEnv, note.on, note.off);
-            if (amplitude <= 0.0)
-                isNoteFinished = true;
-
-            double sound =
-                +1.00 * Synth::osc(time - note.on, Synth::Scale(note.id - 12), Synth::Oscillator::Square) + 0.9 * Synth::osc(time - note.on, 0, Synth::Oscillator::Noise);
-
-            return amplitude * sound * mVolume;
-        }
-    };
-
-    struct Sequencer
-    {
-    public:
-        struct Channel
-        {
-            InstrumentBase *instrument;
-            std::wstring beat;
-        };
-
-        Sequencer(const float tempo = 120.0f, const int beats = 4, const int subBeats = 4)
-        {
-            mBeats = beats;
-            mSubBeats = subBeats;
-            mTempo = tempo;
-            mBeatTime = (60.f / mTempo) / (float)mSubBeats;
-            mCurBeat = 0;
-            mTotalBeats = mBeats * mSubBeats;
-            mAccumulate = 0;
-        }
-
-        size_t Update(const double elapsedTime)
-        {
-            mVecNotes.clear();
-            mAccumulate += elapsedTime;
-            while (mAccumulate >= mBeatTime)
+            int c = 0;
+            for (auto v : mVecChannels)
             {
-                mAccumulate -= mBeatTime;
-                mCurBeat++;
-
-                if (mCurBeat >= mTotalBeats)
-                    mCurBeat = 0;
-
-                int c = 0;
-                for (auto v : mVecChannels)
+                if (v.beat[mCurBeat] == L'X')
                 {
-                    if (v.beat[mCurBeat] == L'X')
-                    {
-                        Note n;
-                        n.channel = mVecChannels[c].instrument;
-                        n.isActive = true;
-                        n.id = 64;
-                        mVecNotes.push_back(n);
-                    }
-                    c++;
+                    Note n;
+                    n.channel = mVecChannels[c].instrument;
+                    n.isActive = true;
+                    n.id = 64;
+                    mVecNotes.push_back(n);
                 }
+                c++;
             }
-
-            return mVecNotes.size();
         }
 
-        void AddInstrument(InstrumentBase *instrument)
-        {
-            Channel c;
-            c.instrument = instrument;
-            mVecChannels.push_back(c);
-        }
+        return mVecNotes.size();
+    }
 
-    public:
-        int mBeats;
-        int mSubBeats;
-        double mTempo;
-        double mBeatTime;
-        double mAccumulate;
-        int mCurBeat;
-        int mTotalBeats;
+    void AddInstrument(InstrumentBase* instrument)
+    {
+        Channel c;
+        c.instrument = instrument;
+        mVecChannels.push_back(c);
+    }
 
-        std::vector<Channel> mVecChannels;
-        std::vector<Note> mVecNotes;
-    };
+  public:
+    int mBeats;
+    int mSubBeats;
+    double mTempo;
+    double mBeatTime;
+    double mAccumulate;
+    int mCurBeat;
+    int mTotalBeats;
+
+    std::vector<Channel> mVecChannels;
+    std::vector<Note> mVecNotes;
+};
 } // namespace Synth
 
 std::vector<Synth::Note> notes;
@@ -386,10 +444,12 @@ Synth::InstrumentDrumSnare drumSnareInstance;
 Synth::InstrumentDrumHiHat drumHiHatInstance;
 
 // Global synthesizer variables
-// double frequencyOutput = 0.0;                    // dominant output frequency of instrument, i.e. the note
-// EnvelopeADSR envelope;                           // amplitude modulation of output to give texture, i.e. the timbre
-// double octaveBaseFrequency = 110.0;              // frequency of octave represensted by keyboard
-// double d12thRootOf2 = std::pow(2.0, 1.0 / 12.0); // assuming western 12 notes per octave
+// double frequencyOutput = 0.0;                    // dominant output frequency
+// of instrument, i.e. the note EnvelopeADSR envelope; // amplitude modulation
+// of output to give texture, i.e. the timbre double octaveBaseFrequency =
+// 110.0;              // frequency of octave represensted by keyboard double
+// d12thRootOf2 = std::pow(2.0, 1.0 / 12.0); // assuming western 12 notes per
+// octave
 
 // Function used by NoiseMaker to generate sound waves
 // Return amplitude [-1.0, 1.0] as a function of time
@@ -399,7 +459,7 @@ double MakeNoise(const unsigned channel, const double time)
     double mixedOutput = 0.0;
 
     // Iterate through all active notes, and mix together
-    for (auto &note : notes)
+    for (auto& note : notes)
     {
         bool isNoteFinished = false;
         double sound = 0;
@@ -417,28 +477,30 @@ double MakeNoise(const unsigned channel, const double time)
             note.isActive = false;
     }
 
-    notes.erase(std::remove_if(std::begin(notes), std::end(notes), [](Synth::Note const &note) { return !(note.isActive); }), std::end(notes));
+    notes.erase(std::remove_if(
+                    std::begin(notes), std::end(notes),
+                    [](Synth::Note const& note) { return !(note.isActive); }),
+                std::end(notes));
 
-    return mixedOutput *
-           0.2; // master volume
+    return mixedOutput * 0.2; // master volume
 }
 
-void PrintDevice(const std::string &device)
+void PrintDevice(const std::string& device)
 {
     std::cout << "Found Output Device: " << device << '\n';
 }
 
-void PrintDevice(const std::wstring &device)
+void PrintDevice(const std::wstring& device)
 {
     std::wcout << "Found Ouput Device: " << device << '\n';
 }
 
-void UsingDevice(const std::string &device)
+void UsingDevice(const std::string& device)
 {
     std::cout << "Using device: " << device << '\n';
 }
 
-void UsingDevice(const std::wstring &device)
+void UsingDevice(const std::wstring& device)
 {
     std::wcout << "Using device: " << device << '\n';
 }
@@ -466,19 +528,25 @@ int main()
     const auto devices = NoiseMaker<short>::Enumerate();
 
     // Display findings
-    for (const auto &device : devices)
+    for (const auto& device : devices)
     {
         PrintDevice(device);
     }
     UsingDevice(devices.front());
 
     std::cout << '\n'
-              << "|   |   |   |   |   | |   |   |   |   | |   | |   |   |   |" << '\n'
-              << "|   | S |   |   | F | | G |   |   | J | | K | | L |   |   |" << '\n'
-              << "|   |___|   |   |___| |___|   |   |___| |___| |___|   |   |__" << '\n'
-              << "|     |     |     |     |     |     |     |     |     |     |" << '\n'
-              << "|  Z  |  X  |  C  |  V  |  B  |  N  |  M  |  ,  |  .  |  /  |" << '\n'
-              << "|_____|_____|_____|_____|_____|_____|_____|_____|_____|_____|" << '\n'
+              << "|   |   |   |   |   | |   |   |   |   | |   | |   |   |   |"
+              << '\n'
+              << "|   | S |   |   | F | | G |   |   | J | | K | | L |   |   |"
+              << '\n'
+              << "|   |___|   |   |___| |___|   |   |___| |___| |___|   |   |__"
+              << '\n'
+              << "|     |     |     |     |     |     |     |     |     |     |"
+              << '\n'
+              << "|  Z  |  X  |  C  |  V  |  B  |  N  |  M  |  ,  |  .  |  /  |"
+              << '\n'
+              << "|_____|_____|_____|_____|_____|_____|_____|_____|_____|_____|"
+              << '\n'
               << '\n';
 
     // Create sound machine!!
@@ -530,12 +598,18 @@ int main()
 
         for (int k = 0; k < 16; ++k)
         {
-            const short keyState = GetAsyncKeyState((unsigned char)("ZSXCFVGBNJMK\xbcL\xbe\xbf"[k]));
+            const short keyState = GetAsyncKeyState(
+                (unsigned char)("ZSXCFVGBNJMK\xbcL\xbe\xbf"[k]));
 
             // Check if note already exists in currently playing notes
             std::scoped_lock<std::mutex> lock(notesMutex);
 
-            auto noteFound = std::find_if(std::begin(notes), std::end(notes), [&k](const Synth::Note &note) { return note.id == k + 64 && note.channel == &harmonicaInstance; });
+            auto noteFound =
+                std::find_if(std::begin(notes), std::end(notes),
+                             [&k](const Synth::Note& note) {
+                                 return note.id == k + 64 &&
+                                        note.channel == &harmonicaInstance;
+                             });
             if (noteFound == std::end(notes))
             {
                 // Note not found in vector
@@ -575,7 +649,8 @@ int main()
             }
         }
 
-        std::cout << "wall time: " << wallTime << " CPU time: " << timeNow << " Latency: " << wallTime - timeNow << std::endl;
+        std::cout << "wall time: " << wallTime << " CPU time: " << timeNow
+                  << " Latency: " << wallTime - timeNow << std::endl;
     }
 
     return 0;
